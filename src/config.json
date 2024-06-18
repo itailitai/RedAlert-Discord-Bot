@@ -1,0 +1,13 @@
+
+{
+  "discord_token": "YOUR_DISCORD_BOT_TOKEN",
+  "google_maps_api_key": "YOUR_GOOGLE_MAPS_API_KEY",
+  "alert_source_url": "https://www.oref.org.il/WarningMessages/alert/alerts.json",
+  "data_files": {
+    "english_cities": "../data/englishCities.json",
+    "area_to_polygon": "area_to_polygon.json",
+    "targets": "targets.json"
+  },
+  "channel_id": YOUR_CHANNEL_ID,
+  "test_mode": false
+}
