@@ -1,10 +1,13 @@
+import io
 import logging
 import random
 import math
 import re
-from datetime import timedelta
+from matplotlib import pyplot as plt
+from datetime import timedelta, datetime
 from io import BytesIO
 
+import aiofiles
 import aiohttp
 from shapely.geometry import Polygon
 import requests
@@ -126,12 +129,29 @@ class RedAlert:
     async def get_red_alerts(self):
         """Retrieve the current red alerts."""
         if self.test_mode:
-            with open("../resources/example.json", encoding="utf-8") as file:
-                data = json.load(file)
-            if not data["data"]:
+            # 70% chance to return empty data
+            if random.random() < 0.7:
                 return None
-            data["timestamp"] = time.time()
-            return data
+            # Generate mock alert data
+            mock_data = {
+                "id": str(random.randint(100000000000000000, 999999999999999999)),
+                "cat": str(random.choice([1, 2, 3, 4, 5, 6])),
+                "title": random.choice([
+                    "ירי רקטות וטילים",
+                    "חדירת כלי טיס עוין",
+                    "רעידת אדמה",
+                    "אירוע חומרים מסוכנים",
+                    "צונאמי",
+                    "חדירת מחבלים",
+                    "אירוע רדיולוגי"
+                ]),
+                "data": random.sample(
+                    [location["label_he"] for location in self.locations],
+                    random.randint(1, 10)
+                ),
+                "desc": "היכנסו מיד למרחב המוגן ושהו בו למשך 10 דקות, אלא אם ניתנה התרעה נוספת"
+            }
+            return mock_data
         else:
             async with aiohttp.ClientSession() as session:
                 async with session.get(ALERT_SOURCE_URL, headers=self.headers, cookies=self.cookies) as response:
@@ -195,7 +215,7 @@ class RedAlert:
         try:
             with open('alert_history.json', 'r') as file:
                 return json.load(file)
-        except FileNotFoundError:
+        except Exception as e:
             return []
 
     def save_alert_history(self):
@@ -276,24 +296,43 @@ async def fetch_and_send_alerts(test_mode=TEST_MODE):
             if alert_category == "Unknown":
                 print(f"Unknown alert category: {red_alerts['title']}")
                 continue
+            if red_alerts["id"] in posted_alert_ids:
+                continue
+            else:
+                posted_alert_ids.add(red_alerts["id"])
+
+            existing_new_alert_cities = {city for city, _, _, _ in new_alerts}
+            existing_recent_alert_cities = {city for city, _, _, _, _ in recent_alerts}
+
             for alert_city in red_alerts["data"]:
                 for obj in alert.locations:
-                    if obj["label_he"] == alert_city and alert_city not in posted_alert_ids:
-                        posted_alert_ids.add(alert_city)
+                    if obj["label_he"] == alert_city:
                         migun_time = obj["migun_time"]
                         coordinates = alert.get_coordinates(alert_city)
                         english_city = html_to_discord(obj["mixname"])
-                        new_alerts.append((english_city, alert_city, migun_time, coordinates))
-                        recent_alerts.append((english_city, alert_city, migun_time, coordinates, time.time()))
-                        alert.add_to_alert_history((english_city, alert_city, migun_time, coordinates, time.time()))
+
+                        if english_city not in existing_new_alert_cities:
+                            new_alerts.append((english_city, alert_city, migun_time, coordinates))
+                            existing_new_alert_cities.add(english_city)
+
+                        if english_city not in existing_recent_alert_cities:
+                            recent_alerts.append((english_city, alert_city, migun_time, coordinates, time.time()))
+                            existing_recent_alert_cities.add(english_city)
+                            alert.add_to_alert_history((english_city, alert_city, migun_time, coordinates, time.time()))
 
             recent_alerts = [alert for alert in recent_alerts if time.time() - alert[4] < 60]
-
+            print(f"Recent alerts: {recent_alerts}")
+            print(f"New alerts: {new_alerts}")
             if new_alerts:
                 description = f"Last updated: {time.strftime('%H:%M:%S')}\n\n"
                 all_alerts = "\n• ".join(f"{city} ({migun_time}s)" for city, _, migun_time, _, _ in recent_alerts)
                 all_alerts = f"• {all_alerts}"  # Add the first bullet point manually
                 description += f"**Locations**:\n```{all_alerts}```\n**Type:**\n```\n{alert_category}```\n"
+
+                map_url = alert.get_map_url(
+                    {city: coords for city, _, migun_time, coords, _ in recent_alerts},
+                    {city for _, city, _, _, _ in recent_alerts},
+                )
 
                 if last_alert_time and (time.time() - last_alert_time < 60):
                     try:
@@ -301,35 +340,26 @@ async def fetch_and_send_alerts(test_mode=TEST_MODE):
                         embed = message.embeds[0] if message.embeds else discord.Embed(
                             title=FRONT_COMMAND_ALERT_TITLE, color=alert_color)
                         embed.description = description
-                        map_url = alert.get_map_url(
-                            {city: coords for city, _, migun_time, coords, _ in recent_alerts},
-                            {city for _, city, _, _, _ in recent_alerts},
-                        )
-                        await update_embed_with_image(embed, map_url, channel)
-                        await message.edit(embed=embed)
+                        await update_embed_with_image(embed, map_url, channel, message)
                     except discord.NotFound:
-                        await send_embed(alert, channel, description, recent_alerts, alert_color)
+                        await send_embed(alert, channel, description, recent_alerts, alert_color, map_url)
                 else:
-                    await send_embed(alert, channel, description, recent_alerts, alert_color)
+                    await send_embed(alert, channel, description, recent_alerts, alert_color, map_url)
                 last_alert_time = time.time()
 
         await asyncio.sleep(2)
 
 
-async def send_embed(alert, channel, description, recent_alerts, alert_color):
+async def send_embed(alert, channel, description, recent_alerts, alert_color, map_url):
     global last_message_id
     embed = discord.Embed(title=FRONT_COMMAND_ALERT_TITLE, color=alert_color)
     embed.description = description
-    map_url = alert.get_map_url(
-        {city: coords for city, _, migun_time, coords, _ in recent_alerts},
-        {city for _, city, _, _, _ in recent_alerts},
-    )
     await update_embed_with_image(embed, map_url, channel)
     # print message formatting to send manually in case of an error
     print(f"{description}")
 
 
-async def update_embed_with_image(embed, map_url, channel):
+async def update_embed_with_image(embed, map_url, channel, message=None):
     global last_message_id
     async with aiohttp.ClientSession() as session:
         async with session.get(map_url) as response:
@@ -337,10 +367,15 @@ async def update_embed_with_image(embed, map_url, channel):
                 image_data = await response.read()
                 image_file = discord.File(BytesIO(image_data), filename="map.png")
                 embed.set_image(url="attachment://map.png")
-                message = await channel.send(embed=embed, file=image_file)
-                last_message_id = message.id
+                if message:
+                    await message.edit(embed=embed, attachments=[image_file])
+                else:
+                    message = await channel.send(embed=embed, file=image_file)
+                    last_message_id = message.id
             else:
                 await channel.send("Failed to download the map image.")
+
+
 
 
 @bot.command(name='registerAlertsBot')
@@ -354,18 +389,66 @@ async def register_alerts_bot(ctx):
     await ctx.send(f"Alerts bot registered to this channel: {ctx.channel.name}")
 
 
-@bot.command(name='alerts_stats')
+@bot.command(name='alerts_stats', aliases=['stats', 'alerts'])
 async def alerts_stats(ctx, period: str = "1h"):
-    alert = RedAlert()
-    stats = alert.get_alert_stats(period)
-    description = f"Alert stats for the past {period}:\n\n"
-    if stats:
-        for city, times in stats.items():
-            times_str = ", ".join(times)
-            description += f"- {city} at {times_str}\n"
+    try:
+        alert = RedAlert()
+        stats = alert.get_alert_stats(period)
+        if stats:
+            # Generate a bar chart
+            await generate_bar_chart(ctx, stats, period)
+        else:
+            description = f"**Alert stats for the past {period}:**\n\nNo alerts in the given period."
+            await ctx.send(description)
+
+    except ValueError as e:
+        await ctx.send(f"Error: {str(e)}. Please use a valid time period format like '1h', '2d', '3w'.")
+    except Exception as e:
+        await ctx.send(f"An unexpected error occurred: {str(e)}")
+
+
+async def generate_bar_chart(ctx, stats, period):
+    cities = list(stats.keys())
+    alert_counts = [len(times) for times in stats.values()]
+
+    plt.figure(figsize=(10, 6), facecolor='#181818')
+    bars = plt.barh(cities, alert_counts, color='#CB0000')  # Dark red bars
+
+    # Add the number of alerts on the bars
+    for bar, count in zip(bars, alert_counts):
+        plt.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height() / 2,
+                 f'{count}', va='center', ha='left', color='red')  # Bright red text
+
+    plt.xlabel('Number of Alerts', color='white')  # White axis label
+    plt.ylabel('Cities', color='white')  # White axis label
+    plt.title(f'Alert Stats for the Past {period}', color='white')  # White title
+    plt.gca().tick_params(axis='both', colors='white')  # White tick labels
+    plt.gca().spines['bottom'].set_color('white')  # White axis line
+    plt.gca().spines['left'].set_color('white')  # White axis line
+    plt.gca().spines['top'].set_color('white')  # White axis line
+    plt.gca().spines['right'].set_color('white')  # White axis line
+    plt.gca().set_facecolor('#181818')  # Set background color to black
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', facecolor='#181818')  # Save with black background
+    buf.seek(0)
+    file = discord.File(buf, filename='alert_stats.png')
+    await ctx.send(file=file)
+    buf.close()
+
+
+# Helper function to handle time periods
+def parse_period(period_str):
+    number = int(period_str[:-1])
+    unit = period_str[-1]
+    if unit == 'h':
+        return datetime.timedelta(hours=number)
+    elif unit == 'd':
+        return datetime.timedelta(days=number)
+    elif unit == 'w':
+        return datetime.timedelta(weeks=number)
     else:
-        description += "No alerts in the given period."
-    await ctx.send(description)
+        raise ValueError("Invalid time period format. Use 'h' for hours, 'd' for days, or 'w' for weeks.")
 
 
 @bot.event
