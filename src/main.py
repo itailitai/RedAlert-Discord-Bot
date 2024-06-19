@@ -1,4 +1,3 @@
-
 import logging
 import random
 import math
@@ -124,7 +123,7 @@ class RedAlert:
         with open(file_path, encoding="utf-8") as file:
             return json.load(file)
 
-    def get_red_alerts(self):
+    async def get_red_alerts(self):
         """Retrieve the current red alerts."""
         if self.test_mode:
             with open("../resources/example.json", encoding="utf-8") as file:
@@ -134,15 +133,21 @@ class RedAlert:
             data["timestamp"] = time.time()
             return data
         else:
-            response = requests.get(ALERT_SOURCE_URL, headers=self.headers, cookies=self.cookies)
-            alerts = response.content.decode("UTF-8").replace("\n", "").replace("\r", "")
-            if len(alerts) <= 1:
-                return None
-            data = json.loads(response.content)
-            if not data["data"]:
-                return None
-            data["timestamp"] = time.time()
-            return data
+            async with aiohttp.ClientSession() as session:
+                async with session.get(ALERT_SOURCE_URL, headers=self.headers, cookies=self.cookies) as response:
+                    if response.status == 200:
+                        alerts = await response.text(encoding='utf-8-sig')
+                        alerts = alerts.replace("\n", "").replace("\r", "")
+                        if len(alerts) <= 1:
+                            return None
+                        data = json.loads(alerts)
+                        if not data["data"]:
+                            return None
+                        data["timestamp"] = time.time()
+                        return data
+                    else:
+                        logging.error(f"Error fetching red alerts: {response.status}")
+                        return None
 
     def encode_polygon_path(self, coordinates):
         """Encode a list of latitude and longitude tuples into a path string for Google Static Maps."""
@@ -178,7 +183,7 @@ class RedAlert:
             "key": GOOGLE_MAPS_API_KEY,
         }
 
-        if len(cities_list) == 1:
+        if len(hebrew_region) == 1:
             params["zoom"] = 12
 
         url = f"{base_url}?{'&'.join([f'{k}={v}' for k, v in params.items()])}{markers_param}{paths_param}"
@@ -262,7 +267,7 @@ async def fetch_and_send_alerts(test_mode=TEST_MODE):
     }
 
     while not bot.is_closed():
-        red_alerts = alert.get_red_alerts()
+        red_alerts = await alert.get_red_alerts()
         channel = bot.get_channel(CHANNEL_ID)
         if red_alerts:
             new_alerts = []
@@ -322,7 +327,6 @@ async def send_embed(alert, channel, description, recent_alerts, alert_color):
     await update_embed_with_image(embed, map_url, channel)
     # print message formatting to send manually in case of an error
     print(f"{description}")
-
 
 
 async def update_embed_with_image(embed, map_url, channel):
