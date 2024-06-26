@@ -1,8 +1,13 @@
+import base64
 import io
 import logging
+import os
 import random
 import math
 import re
+import pyperclip
+
+from PIL import Image
 from matplotlib import pyplot as plt
 from datetime import timedelta, datetime
 from io import BytesIO
@@ -374,9 +379,6 @@ async def update_embed_with_image(embed, map_url, channel, message=None):
                     last_message_id = message.id
             else:
                 await channel.send("Failed to download the map image.")
-
-
-
 
 @bot.command(name='registerAlertsBot')
 @commands.is_owner()
