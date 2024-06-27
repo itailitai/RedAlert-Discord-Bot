@@ -5,7 +5,6 @@ import os
 import random
 import math
 import re
-import pyperclip
 
 from PIL import Image
 from matplotlib import pyplot as plt
@@ -306,7 +305,7 @@ async def fetch_and_send_alerts(test_mode=TEST_MODE):
             else:
                 posted_alert_ids.add(red_alerts["id"])
 
-            existing_new_alert_cities = {city for city, _, _, _ in new_alerts}
+            existing_new_alert_cities = set()
             existing_recent_alert_cities = {city for city, _, _, _, _ in recent_alerts}
 
             for alert_city in red_alerts["data"]:
@@ -320,14 +319,18 @@ async def fetch_and_send_alerts(test_mode=TEST_MODE):
                             new_alerts.append((english_city, alert_city, migun_time, coordinates))
                             existing_new_alert_cities.add(english_city)
 
-                        if english_city not in existing_recent_alert_cities:
-                            recent_alerts.append((english_city, alert_city, migun_time, coordinates, time.time()))
-                            existing_recent_alert_cities.add(english_city)
-                            alert.add_to_alert_history((english_city, alert_city, migun_time, coordinates, time.time()))
+            if existing_new_alert_cities.issubset(existing_recent_alert_cities):
+                print("No new cities in the alert. Skipping update.")
+                await asyncio.sleep(2)
+                continue
+
+            for city, alert_city, migun_time, coordinates in new_alerts:
+                recent_alerts.append((city, alert_city, migun_time, coordinates, time.time()))
 
             recent_alerts = [alert for alert in recent_alerts if time.time() - alert[4] < 60]
             print(f"Recent alerts: {recent_alerts}")
             print(f"New alerts: {new_alerts}")
+
             if new_alerts:
                 description = f"Last updated: {time.strftime('%H:%M:%S')}\n\n"
                 all_alerts = "\n• ".join(f"{city} ({migun_time}s)" for city, _, migun_time, _, _ in recent_alerts)
@@ -355,6 +358,7 @@ async def fetch_and_send_alerts(test_mode=TEST_MODE):
         await asyncio.sleep(2)
 
 
+
 async def send_embed(alert, channel, description, recent_alerts, alert_color, map_url):
     global last_message_id
     embed = discord.Embed(title=FRONT_COMMAND_ALERT_TITLE, color=alert_color)
@@ -379,6 +383,7 @@ async def update_embed_with_image(embed, map_url, channel, message=None):
                     last_message_id = message.id
             else:
                 await channel.send("Failed to download the map image.")
+
 
 @bot.command(name='registerAlertsBot')
 @commands.is_owner()
