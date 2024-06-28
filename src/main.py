@@ -305,7 +305,6 @@ async def fetch_and_send_alerts(test_mode=TEST_MODE):
             else:
                 posted_alert_ids.add(red_alerts["id"])
 
-            existing_new_alert_cities = set()
             existing_recent_alert_cities = {city for city, _, _, _, _ in recent_alerts}
 
             for alert_city in red_alerts["data"]:
@@ -315,12 +314,15 @@ async def fetch_and_send_alerts(test_mode=TEST_MODE):
                         coordinates = alert.get_coordinates(alert_city)
                         english_city = html_to_discord(obj["mixname"])
 
-                        if english_city not in existing_new_alert_cities:
+                        if english_city not in existing_recent_alert_cities:
                             new_alerts.append((english_city, alert_city, migun_time, coordinates))
-                            existing_new_alert_cities.add(english_city)
+                            existing_recent_alert_cities.add(english_city)
 
-            if existing_new_alert_cities.issubset(existing_recent_alert_cities):
+            print(f"Existing recent alert cities: {existing_recent_alert_cities}")
+
+            if not new_alerts:
                 print("No new cities in the alert. Skipping update.")
+                recent_alerts = [alert for alert in recent_alerts if time.time() - alert[4] < 60]
                 await asyncio.sleep(2)
                 continue
 
