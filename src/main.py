@@ -1,11 +1,11 @@
 import base64
 import io
 import logging
-import os
 import random
 import math
 import re
-
+import sys
+import os
 from PIL import Image
 from matplotlib import pyplot as plt
 from datetime import timedelta, datetime
@@ -317,6 +317,7 @@ async def fetch_and_send_alerts(test_mode=TEST_MODE):
                         if english_city not in existing_recent_alert_cities:
                             new_alerts.append((english_city, alert_city, migun_time, coordinates))
                             existing_recent_alert_cities.add(english_city)
+                            alert.add_to_alert_history((english_city, alert_city, migun_time, coordinates, time.time()))
 
             print(f"Existing recent alert cities: {existing_recent_alert_cities}")
 
@@ -415,6 +416,12 @@ async def alerts_stats(ctx, period: str = "1h"):
     except Exception as e:
         await ctx.send(f"An unexpected error occurred: {str(e)}")
 
+@bot.command(name='restart')
+@commands.is_owner()
+async def restart(ctx):
+    await ctx.send("Restarting the bot...")
+    os.execv(sys.executable, ['python'] + sys.argv)
+
 
 async def generate_bar_chart(ctx, stats, period):
     cities = list(stats.keys())
@@ -465,6 +472,8 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
     bot.loop.create_task(fetch_and_send_alerts())
     print("Bot is ready and listening for commands and alerts")
+    channel = bot.get_channel(CHANNEL_ID)
+    await channel.send("Alerts bot is online and listening for alerts.")
 
 
 async def main():
