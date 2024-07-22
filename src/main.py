@@ -151,7 +151,7 @@ class RedAlert:
                 ]),
                 "data": random.sample(
                     [location["label_he"] for location in self.locations],
-                    random.randint(1, 10)
+                    random.randint(1, 2)
                 ),
                 "desc": "היכנסו מיד למרחב המוגן ושהו בו למשך 10 דקות, אלא אם ניתנה התרעה נוספת"
             }
@@ -163,12 +163,19 @@ class RedAlert:
                         alerts = await response.text(encoding='utf-8-sig')
                         alerts = alerts.replace("\n", "").replace("\r", "")
                         if len(alerts) <= 1:
+                            logging.warning("Received empty alerts response")
                             return None
-                        data = json.loads(alerts)
-                        if not data["data"]:
+                        try:
+                            data = json.loads(alerts)
+                            if not data.get("data"):
+                                logging.warning("Received alerts response with no data")
+                                return None
+                            data["timestamp"] = time.time()
+                            return data
+                        except json.JSONDecodeError as e:
+                            logging.error(f"JSON decode error: {e}")
+                            logging.error(f"Response content: {alerts}")
                             return None
-                        data["timestamp"] = time.time()
-                        return data
                     else:
                         logging.error(f"Error fetching red alerts: {response.status}")
                         return None
@@ -177,12 +184,33 @@ class RedAlert:
         """Encode a list of latitude and longitude tuples into a path string for Google Static Maps."""
         return "|".join(f"{lat},{lng}" for lat, lng in coordinates)
 
+    # Haversine formula to calculate distance between two points
+    def haversine_distance(self, coord1, coord2):
+        R = 6371000  # Radius of the Earth in meters
+        lat1, lon1 = math.radians(coord1[0]), math.radians(coord1[1])
+        lat2, lon2 = math.radians(coord2[0]), math.radians(coord2[1])
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return R * c
+
+    # Function to determine the appropriate zoom level based on maximum distance
+    def calculate_zoom_level(self, max_distance):
+        if max_distance < 1000:  # Streets
+            return 12
+        elif max_distance < 5000:  # City
+            return 11
+        else:  # World
+            return -1
+
     def get_map_url(self, coordinates, hebrew_region):
         """Generate a static map URL with markers and polygon paths."""
         base_url = "https://maps.googleapis.com/maps/api/staticmap"
         markers = []
         paths = []
         cities_list = []
+        all_coords = []
 
         for region, cities in coordinates.items():
             cities_list = cities
@@ -190,6 +218,7 @@ class RedAlert:
                 lat = f"{coord['lat']:.6f}"
                 lng = f"{coord['lng']:.6f}"
                 markers.append(f"color:red|{lat},{lng}")
+                all_coords.append((coord['lat'], coord['lng']))
 
         for region in hebrew_region:
             if region in self.area_to_polygon:
@@ -205,10 +234,24 @@ class RedAlert:
             "size": "800x400",
             "maptype": "roadmap",
             "key": GOOGLE_MAPS_API_KEY,
+
         }
 
         if len(hebrew_region) == 1:
             params["zoom"] = 12
+
+        max_distance = 0
+        if len(all_coords) > 1:
+            print(f"All coords: {all_coords}")
+            for i in range(len(all_coords)):
+                for j in range(i + 1, len(all_coords)):
+                    distance = self.haversine_distance(all_coords[i], all_coords[j])
+                    max_distance = max(max_distance, distance)
+
+        print(f"Max distance: {max_distance}")
+        zoom_level = self.calculate_zoom_level(max_distance)
+        if zoom_level != -1 and "zoom" not in params:
+            params["zoom"] = zoom_level
 
         url = f"{base_url}?{'&'.join([f'{k}={v}' for k, v in params.items()])}{markers_param}{paths_param}"
         if len(url) > 8192:
@@ -361,7 +404,6 @@ async def fetch_and_send_alerts(test_mode=TEST_MODE):
         await asyncio.sleep(2)
 
 
-
 async def send_embed(alert, channel, description, recent_alerts, alert_color, map_url):
     global last_message_id
     embed = discord.Embed(title=FRONT_COMMAND_ALERT_TITLE, color=alert_color)
@@ -415,6 +457,7 @@ async def alerts_stats(ctx, period: str = "1h"):
         await ctx.send(f"Error: {str(e)}. Please use a valid time period format like '1h', '2d', '3w'.")
     except Exception as e:
         await ctx.send(f"An unexpected error occurred: {str(e)}")
+
 
 @bot.command(name='restart')
 @commands.is_owner()
