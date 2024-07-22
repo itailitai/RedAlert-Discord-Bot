@@ -242,13 +242,11 @@ class RedAlert:
 
         max_distance = 0
         if len(all_coords) > 1:
-            print(f"All coords: {all_coords}")
             for i in range(len(all_coords)):
                 for j in range(i + 1, len(all_coords)):
                     distance = self.haversine_distance(all_coords[i], all_coords[j])
                     max_distance = max(max_distance, distance)
 
-        print(f"Max distance: {max_distance}")
         zoom_level = self.calculate_zoom_level(max_distance)
         if zoom_level != -1 and "zoom" not in params:
             params["zoom"] = zoom_level
