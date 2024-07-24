@@ -197,9 +197,10 @@ class RedAlert:
 
     # Function to determine the appropriate zoom level based on maximum distance
     def calculate_zoom_level(self, max_distance):
-        if max_distance < 1000:  # Streets
+        print(f"Max distance: {max_distance}")
+        if max_distance < 5000:
             return 12
-        elif max_distance < 5000:  # City
+        elif max_distance < 15000:  # City
             return 11
         else:  # World
             return -1
