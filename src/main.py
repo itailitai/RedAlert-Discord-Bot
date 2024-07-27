@@ -130,13 +130,12 @@ class RedAlert:
         with open(file_path, encoding="utf-8") as file:
             return json.load(file)
 
-    async def get_red_alerts(self):
-        """Retrieve the current red alerts."""
+    async def get_red_alerts(self, max_retries=5, backoff_factor=2):
+        """Retrieve the current red alerts with retry mechanism."""
         if self.test_mode:
-            # 70% chance to return empty data
+            # Mock data for test mode
             if random.random() < 0.7:
                 return None
-            # Generate mock alert data
             mock_data = {
                 "id": str(random.randint(100000000000000000, 999999999999999999)),
                 "cat": str(random.choice([1, 2, 3, 4, 5, 6])),
@@ -157,28 +156,42 @@ class RedAlert:
             }
             return mock_data
         else:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(ALERT_SOURCE_URL, headers=self.headers, cookies=self.cookies) as response:
-                    if response.status == 200:
-                        alerts = await response.text(encoding='utf-8-sig')
-                        alerts = alerts.replace("\n", "").replace("\r", "")
-                        if len(alerts) <= 1:
-                            logging.warning("Received empty alerts response")
-                            return None
-                        try:
-                            data = json.loads(alerts)
-                            if not data.get("data"):
-                                logging.warning("Received alerts response with no data")
+            retries = 0
+            while retries < max_retries:
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(ALERT_SOURCE_URL, headers=self.headers, cookies=self.cookies) as response:
+                            if response.status == 200:
+                                alerts = await response.text(encoding='utf-8-sig')
+                                alerts = alerts.replace("\n", "").replace("\r", "")
+                                if len(alerts) <= 1:
+                                    logging.warning("Received empty alerts response")
+                                    return None
+                                try:
+                                    data = json.loads(alerts)
+                                    if not data.get("data"):
+                                        logging.warning("Received alerts response with no data")
+                                        return None
+                                    data["timestamp"] = time.time()
+                                    return data
+                                except json.JSONDecodeError as e:
+                                    logging.error(f"JSON decode error: {e}")
+                                    logging.error(f"Response content: {alerts}")
+                                    return None
+                            else:
+                                logging.error(f"Error fetching red alerts: {response.status}")
                                 return None
-                            data["timestamp"] = time.time()
-                            return data
-                        except json.JSONDecodeError as e:
-                            logging.error(f"JSON decode error: {e}")
-                            logging.error(f"Response content: {alerts}")
-                            return None
-                    else:
-                        logging.error(f"Error fetching red alerts: {response.status}")
-                        return None
+                except aiohttp.ClientConnectorError as e:
+                    logging.error(f"Connection error: {e}")
+                    retries += 1
+                    sleep_time = backoff_factor ** retries
+                    logging.info(f"Retrying in {sleep_time} seconds...")
+                    await asyncio.sleep(sleep_time)
+                except Exception as e:
+                    logging.error(f"Unexpected error: {e}")
+                    return None
+            logging.error(f"Failed to fetch red alerts after {max_retries} retries")
+            return None
 
     def encode_polygon_path(self, coordinates):
         """Encode a list of latitude and longitude tuples into a path string for Google Static Maps."""
@@ -361,6 +374,7 @@ async def fetch_and_send_alerts(test_mode=TEST_MODE):
                             existing_recent_alert_cities.add(english_city)
                             alert.add_to_alert_history((english_city, alert_city, migun_time, coordinates, time.time()))
 
+            recent_alerts = [alert for alert in recent_alerts if time.time() - alert[4] < 60]
             print(f"Existing recent alert cities: {existing_recent_alert_cities}")
 
             if not new_alerts:
