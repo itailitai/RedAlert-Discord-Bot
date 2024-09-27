@@ -10,6 +10,7 @@ from PIL import Image
 from matplotlib import pyplot as plt
 from datetime import timedelta, datetime
 from io import BytesIO
+from fuzzywuzzy import process
 
 import aiofiles
 import aiohttp
@@ -32,7 +33,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Example usage of config
 TOKEN = config['discord_token']
-CHANNEL_ID = config.get('channel_id', None)
+CHANNEL_IDS = config.get('channel_ids', [])
 GOOGLE_MAPS_API_KEY = config['google_maps_api_key']
 ALERT_SOURCE_URL = config['alert_source_url']
 TEST_MODE = config['test_mode']
@@ -59,6 +60,7 @@ class RedAlert:
     def __init__(self, test_mode=False):
         self.locations = self.get_locations_list(DATA_FILES['targets'])
         self.area_to_polygon = self.load_area_to_polygon(DATA_FILES['area_to_polygon'])
+        self.area_to_coordinates = self.load_area_to_coordinates(DATA_FILES['area_to_coordinates'])
         self.cookies = None
         self.headers = {
             "Host": "www.oref.org.il",
@@ -70,17 +72,45 @@ class RedAlert:
             "User-Agent": "",
             "sec-ch-ua-platform": "macOS",
             "Accept": "*/*",
-            "sec-ch-ua": '".Not/A)Brand";v="99", "Google Chrome";v="103", "Chromium";v="103"',
+            "sec-ch-ua": '".Not/A)Brand";v="99", "Google Chrome";v="127", "Chromium";v="127"',
             "Sec-Fetch-Site": "same-origin",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Dest": "empty",
-            "Referer": "https://www.oref.org.il/12481-he/Pakar.aspx",
+            "Referer": "https://www.oref.org.il/eng/alerts-history",
             "Accept-Encoding": "gzip, deflate, br",
             "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
         }
         self.get_cookies()
         self.test_mode = test_mode
         self.alert_history = self.load_alert_history()
+        with open('locality_residents.json', 'r') as json_file:
+            self.locality_data = json.load(json_file)
+
+    def find_closest_match(self, query):
+        """Find the closest match for a locality and return its population."""
+        localities = list(self.locality_data.keys())
+        query = query.split("|")[0].strip()
+        closest_match, score = process.extractOne(query, localities)
+        if score >= 70:  # Threshold for similarity
+            return closest_match, self.locality_data[closest_match]
+        else:
+            logging.warning(f"No close match found for {query}. Similarity Score: {score}")
+            return None, 0
+
+    def calculate_total_population(self, alert_cities):
+        """Calculate the total affected population, counting each city once."""
+        total_population = 0
+        counted_cities = set()
+
+        for city_he, city_en in alert_cities:
+            # Assuming city_en is the English name; adjust if necessary
+            if city_en.lower() not in counted_cities:
+                match, population = self.find_closest_match(city_en)
+                if match:
+                    total_population += population
+                    counted_cities.add(city_en.lower())
+
+        return total_population
 
     def get_cookies(self):
         """Retrieve cookies from the server."""
@@ -89,23 +119,20 @@ class RedAlert:
         self.cookies = response.cookies
 
     def get_coordinates(self, location_names):
-        """Get city coordinates by given city names."""
+        """Get city coordinates by given city names from local JSON."""
         coordinates = {}
         for location_name in location_names.split(","):
-            try:
-                params = {"address": location_name.strip(), "key": GOOGLE_MAPS_API_KEY}
-                response = requests.get("https://maps.googleapis.com/maps/api/geocode/json", params=params)
-                response.raise_for_status()
-                data = response.json()
-                if data["status"] == "OK":
-                    coordinates[location_name.strip()] = data["results"][0]["geometry"]["location"]
-                else:
-                    logging.warning(f"Error fetching coordinates for {location_name.strip()}: {data['status']}")
-            except requests.RequestException as e:
-                logging.error(f"Error fetching coordinates: {e}")
-            except json.JSONDecodeError as e:
-                logging.error(f"JSON decode error for {location_name.strip()}: {e}")
+            location_name = location_name.strip()
+            if location_name in self.area_to_coordinates:
+                coord = self.area_to_coordinates[location_name]
+                coordinates[location_name] = {
+                    'lat': coord['lat'],
+                    'lng': coord['long']  # Rename 'long' to 'lng' to match Google Maps API format
+                }
+            else:
+                logging.warning(f"Coordinates not found for {location_name}")
         return coordinates
+
 
     def random_coordinates(self, latitude, longitude):
         """Generate random coordinates within a city for visualization."""
@@ -122,6 +149,11 @@ class RedAlert:
 
     def load_area_to_polygon(self, file_path):
         """Load area to polygon mappings from a JSON file."""
+        with open(file_path, encoding="utf-8") as file:
+            return json.load(file)
+
+    def load_area_to_coordinates(self, file_path):
+        """Load area to coordinates mappings from a JSON file."""
         with open(file_path, encoding="utf-8") as file:
             return json.load(file)
 
@@ -160,11 +192,14 @@ class RedAlert:
             while retries < max_retries:
                 try:
                     async with aiohttp.ClientSession() as session:
-                        async with session.get(ALERT_SOURCE_URL, headers=self.headers, cookies=self.cookies) as response:
+                        async with session.get(ALERT_SOURCE_URL, headers=self.headers,
+                                               cookies=self.cookies) as response:
                             if response.status == 200:
                                 alerts = await response.text(encoding='utf-8-sig')
+                                print(alerts)
                                 alerts = alerts.replace("\n", "").replace("\r", "")
-                                if len(alerts) <= 1:
+
+                                if len(alerts) <= 0:
                                     logging.warning("Received empty alerts response")
                                     return None
                                 try:
@@ -173,6 +208,7 @@ class RedAlert:
                                         logging.warning("Received alerts response with no data")
                                         return None
                                     data["timestamp"] = time.time()
+                                    logging.info(f"Received red alerts")
                                     return data
                                 except json.JSONDecodeError as e:
                                     logging.error(f"JSON decode error: {e}")
@@ -314,7 +350,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='/', intents=intents)
 
 posted_alert_ids = set()
-last_message_id = None
+last_message_ids = []
 last_alert_time = None
 recent_alerts = []
 
@@ -331,12 +367,12 @@ async def fetch_and_send_alerts(test_mode=TEST_MODE):
     await bot.wait_until_ready()
     alert = RedAlert(test_mode=test_mode)
 
-    global last_message_id
+    global last_message_ids
     global last_alert_time
     global recent_alerts
 
     alert_categories = {
-        "ירי רקטות וטילים": (discord.Colour.red(), "Missiles 🚀"),
+        "ירי רקטות וטילים": (discord.Colour.red(), "Rockets 🚀"),
         "חדירת כלי טיס עוין": (discord.Colour.orange(), "Hostile aircraft intrusion 🛩️"),
         "רעידת אדמה": (discord.Colour.purple(), "Earthquake 🌍"),
         "אירוע חומרים מסוכנים": (discord.Colour.yellow(), "Hazardous Materials Incident ☣️"),
@@ -345,113 +381,153 @@ async def fetch_and_send_alerts(test_mode=TEST_MODE):
         "אירוע רדיולוגי": (discord.Colour.green(), "Radiological Incident ☢️"),
     }
 
+    last_message_ids = []
+    channels = [bot.get_channel(channel_id) for channel_id in CHANNEL_IDS]
     while not bot.is_closed():
         red_alerts = await alert.get_red_alerts()
-        channel = bot.get_channel(CHANNEL_ID)
         if red_alerts:
-            new_alerts = []
             alert_category = alert_categories.get(red_alerts["title"], (None, "Unknown"))[1]
             alert_color = alert_categories.get(red_alerts["title"], (None, "Unknown"))[0]
             if alert_category == "Unknown":
-                print(f"Unknown alert category: {red_alerts['title']}")
+                logging.warning(f"Unknown alert category: {red_alerts['title']}")
+                await asyncio.sleep(2)
                 continue
             if red_alerts["id"] in posted_alert_ids:
+                logging.info("Duplicate alert ID received. Skipping.")
+                await asyncio.sleep(2)
                 continue
             else:
                 posted_alert_ids.add(red_alerts["id"])
 
             existing_recent_alert_cities = {city for city, _, _, _, _ in recent_alerts}
 
+            new_alerts = []
+            affected_cities = []  # List to store (city_he, city_en)
+
             for alert_city in red_alerts["data"]:
                 for obj in alert.locations:
                     if obj["label_he"] == alert_city:
                         migun_time = obj["migun_time"]
-                        coordinates = alert.get_coordinates(alert_city)
                         english_city = html_to_discord(obj["mixname"])
+                        coordinates = alert.get_coordinates(alert_city)
+                        if not coordinates:
+                            logging.warning(f"No coordinates available for {alert_city}. Skipping this city.")
+                            continue  # Skip this city if coordinates are missing
 
                         if english_city not in existing_recent_alert_cities:
+                            # Append only 4 elements to new_alerts
                             new_alerts.append((english_city, alert_city, migun_time, coordinates))
+                            affected_cities.append((alert_city, english_city))
                             existing_recent_alert_cities.add(english_city)
+                            # Add to alert history with 5 elements
                             alert.add_to_alert_history((english_city, alert_city, migun_time, coordinates, time.time()))
 
-            recent_alerts = [alert for alert in recent_alerts if time.time() - alert[4] < 60]
-            print(f"Existing recent alert cities: {existing_recent_alert_cities}")
+            # Clean up recent_alerts to only include alerts within the last 30 seconds
+            recent_alerts = [a for a in recent_alerts if time.time() - a[4] < 30]
+            logging.debug(f"Existing recent alert cities: {existing_recent_alert_cities}")
 
             if not new_alerts:
-                print("No new cities in the alert. Skipping update.")
-                recent_alerts = [alert for alert in recent_alerts if time.time() - alert[4] < 60]
+                logging.info("No new cities in the alert. Skipping update.")
                 await asyncio.sleep(2)
                 continue
 
-            for city, alert_city, migun_time, coordinates in new_alerts:
-                recent_alerts.append((city, alert_city, migun_time, coordinates, time.time()))
+            # Add new alerts to recent_alerts with the current timestamp
+            for alert_entry in new_alerts:
+                recent_alerts.append((*alert_entry, time.time()))  # Ensure 5 elements
 
-            recent_alerts = [alert for alert in recent_alerts if time.time() - alert[4] < 60]
-            print(f"Recent alerts: {recent_alerts}")
-            print(f"New alerts: {new_alerts}")
+            # Aggregate all affected cities from recent_alerts
+            all_affected_cities = [(city_he, city_en) for city_en, city_he, _, _, _ in recent_alerts]
 
-            if new_alerts:
-                description = f"Last updated: {time.strftime('%H:%M:%S')}\n\n"
-                all_alerts = "\n• ".join(f"{city} ({migun_time}s)" for city, _, migun_time, _, _ in recent_alerts)
-                all_alerts = f"• {all_alerts}"  # Add the first bullet point manually
-                description += f"**Locations**:\n```{all_alerts}```\n**Type:**\n```\n{alert_category}```\n"
+            # Calculate total affected population from all recent alerts
+            total_population = alert.calculate_total_population(all_affected_cities)
 
-                map_url = alert.get_map_url(
-                    {city: coords for city, _, migun_time, coords, _ in recent_alerts},
-                    {city for _, city, _, _, _ in recent_alerts},
-                )
+            # Prepare embed description
+            description = f"Last updated: {time.strftime('%H:%M:%S')}\n\n"
+            all_alerts = "\n• ".join(f"{city} ({migun_time}s)" for city, _, migun_time, _, _ in recent_alerts)
+            all_alerts = f"• {all_alerts}"  # Add the first bullet point manually
+            description += f"**Locations**:\n```{all_alerts}```\n**Type:**\n```\n{alert_category}```\n"
+            description += f"**Total Affected Population:** {total_population:,} 👥"
 
-                if last_alert_time and (time.time() - last_alert_time < 60):
-                    try:
-                        message = await channel.fetch_message(last_message_id)
-                        embed = message.embeds[0] if message.embeds else discord.Embed(
-                            title=FRONT_COMMAND_ALERT_TITLE, color=alert_color)
-                        embed.description = description
-                        await update_embed_with_image(embed, map_url, channel, message)
-                    except discord.NotFound:
-                        await send_embed(alert, channel, description, recent_alerts, alert_color, map_url)
-                else:
-                    await send_embed(alert, channel, description, recent_alerts, alert_color, map_url)
-                last_alert_time = time.time()
+            # Generate map URL as before...
+            map_url = alert.get_map_url(
+                {city: coords for city, _, migun_time, coords, _ in recent_alerts},
+                {city for _, city, _, _, _ in recent_alerts},
+            )
+
+            if last_alert_time and (time.time() - last_alert_time < 30):
+                try:
+                    messages = [await channel.fetch_message(msg_id) for channel, msg_id in
+                                zip(channels, last_message_ids)]
+                    embed = messages[0].embeds[0] if messages[0].embeds else discord.Embed(
+                        title=FRONT_COMMAND_ALERT_TITLE, color=alert_color)
+                    embed.description = description
+                    last_message_ids = await update_embed_with_image(embed, map_url, channels, messages)
+                except discord.NotFound:
+                    await send_embed(alert, channels, description, recent_alerts, alert_color, map_url)
+            else:
+                await send_embed(alert, channels, description, recent_alerts, alert_color, map_url)
+
+            last_alert_time = time.time()
+        else:
+            # Clean up recent_alerts to only include alerts within the last 30 seconds
+            recent_alerts = [a for a in recent_alerts if time.time() - a[4] < 30]
+            logging.warning(f"Recent alerts after cleanup: {recent_alerts}")
 
         await asyncio.sleep(2)
 
 
-async def send_embed(alert, channel, description, recent_alerts, alert_color, map_url):
-    global last_message_id
+async def send_embed(alert, channels, description, recent_alerts, alert_color, map_url):
+    global last_message_ids
     embed = discord.Embed(title=FRONT_COMMAND_ALERT_TITLE, color=alert_color)
     embed.description = description
-    await update_embed_with_image(embed, map_url, channel)
-    # print message formatting to send manually in case of an error
+    last_message_ids = await update_embed_with_image(embed, map_url, channels)
     print(f"{description}")
 
 
-async def update_embed_with_image(embed, map_url, channel, message=None):
-    global last_message_id
+async def update_embed_with_image(embed, map_url, channels, messages=None):
+    global last_message_ids
     async with aiohttp.ClientSession() as session:
         async with session.get(map_url) as response:
             if response.status == 200:
                 image_data = await response.read()
-                image_file = discord.File(BytesIO(image_data), filename="map.png")
-                embed.set_image(url="attachment://map.png")
-                if message:
-                    await message.edit(embed=embed, attachments=[image_file])
-                else:
-                    message = await channel.send(embed=embed, file=image_file)
-                    last_message_id = message.id
+                new_messages = []
+                for i, channel in enumerate(channels):
+                    image_file = discord.File(BytesIO(image_data), filename="map.png")
+                    embed_copy = embed.copy()
+                    embed_copy.set_image(url="attachment://map.png")
+
+                    if messages and i < len(messages):
+                        try:
+                            await messages[i].edit(embed=embed_copy, attachments=[image_file])
+                            new_messages.append(messages[i])
+                        except discord.HTTPException:
+                            # If edit fails, delete old message and send a new one
+                            await messages[i].delete()
+                            message = await channel.send(embed=embed_copy, file=image_file)
+                            new_messages.append(message)
+                    else:
+                        message = await channel.send(embed=embed_copy, file=image_file)
+                        new_messages.append(message)
+
+                return [message.id for message in new_messages]
             else:
-                await channel.send("Failed to download the map image.")
+                for channel in channels:
+                    await channel.send("Failed to download the map image.")
+                return []
 
 
 @bot.command(name='registerAlertsBot')
 @commands.is_owner()
 async def register_alerts_bot(ctx):
-    global CHANNEL_ID
-    CHANNEL_ID = ctx.channel.id
-    config['channel_id'] = CHANNEL_ID
-    with open('config.json', 'w') as config_file:
-        json.dump(config, config_file)
-    await ctx.send(f"Alerts bot registered to this channel: {ctx.channel.name}")
+    global CHANNEL_IDS
+    if ctx.channel.id not in CHANNEL_IDS:
+        CHANNEL_IDS.append(ctx.channel.id)
+        config['channel_ids'] = CHANNEL_IDS
+        with open('config.json', 'w') as config_file:
+            json.dump(config, config_file)
+        await ctx.send(f"Alerts bot registered to this channel: {ctx.channel.name}")
+    else:
+        await ctx.send(f"This channel is already registered for alerts.")
 
 
 @bot.command(name='alerts_stats', aliases=['stats', 'alerts'])
@@ -528,8 +604,6 @@ async def on_ready():
     print(f"Logged in as {bot.user}")
     bot.loop.create_task(fetch_and_send_alerts())
     print("Bot is ready and listening for commands and alerts")
-    channel = bot.get_channel(CHANNEL_ID)
-    await channel.send("Alerts bot is online and listening for alerts.")
 
 
 async def main():
