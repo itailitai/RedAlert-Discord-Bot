@@ -8,6 +8,10 @@
     "area_to_polygon": "area_to_polygon.json",
     "targets": "targets.json"
   },
-  "channel_id": YOUR_CHANNEL_ID,
-  "test_mode": false
+  "channel_ids": ,
+  "test_mode": false,
+"telegram_api_id": 0,
+    "telegram_api_hash": "HASH",
+  "telegram_channel": "CHANNEL",
+  "telegram_phone": "PHONE"
 }
